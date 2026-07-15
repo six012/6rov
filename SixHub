@@ -87,7 +87,7 @@ local function EnforceWeaponAttributes(item)
     local targetSpread, targetSpeed, targetAuto
     
     if item.Name == "M4A1" then
-        if _G.M4A1_Enabled then targetSpread = 0; targetSpeed = (_G.M4A1_Speed == "Fast") and 0.03 or 0.06; targetAuto = true
+        if _G.M4A1_Enabled then targetSpread = 0; targetSpeed = (_G.M4A1_Speed == "Fast") and 0.05 or 0.07; targetAuto = true
         else targetSpread = def.SpreadRadius; targetSpeed = def.FireRate; targetAuto = def.AutoFire end
         
     elseif item.Name == "AK-47" then
