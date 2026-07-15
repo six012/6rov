@@ -66,7 +66,7 @@ end
 local OriginalData = {}
 local FriendCache = {}
 
-local TargetWeapons = { ["M4A1"] = true, ["AK-47"] = true, ["Remington 870"] = true, ["M9"] = true, ["Taser"] = true, ["MP5"] = true }
+local TargetWeapons = { ["M4A1"] = true, ["AK-47"] = true, ["Remington 870"] = true, ["M9"] = true, ["MP5"] = true }
 
 -- STATUS ABSOLUTOS PADRÕES DO JOGO (Remington ajustada para 0.06 inicial de fábrica)
 local WeaponDefaults = {
@@ -74,8 +74,7 @@ local WeaponDefaults = {
     ["AK-47"] = { SpreadRadius = 0.04, FireRate = 0.1, AutoFire = true },
     ["Remington 870"] = { SpreadRadius = 0.06, FireRate = 0.8, AutoFire = false },
     ["M9"] = { SpreadRadius = 0.01, FireRate = 0.15, AutoFire = false },
-    ["MP5"] = { SpreadRadius = 0.02, FireRate = 0.08, AutoFire = true },
-    ["Taser"] = { SpreadRadius = 0, FireRate = 0.5, AutoFire = false }
+    ["MP5"] = { SpreadRadius = 0.02, FireRate = 0.08, AutoFire = true }
 }
 
 -- // APLICAÇÃO INSTANTÂNEA E DIRETA
@@ -107,6 +106,10 @@ local function EnforceWeaponAttributes(item)
     elseif item.Name == "M9" then
         if _G.M9_Enabled then targetSpread = 0; targetSpeed = (_G.M9_Speed == "Fast") and 0.07 or 0.10; targetAuto = true
         else targetSpread = def.SpreadRadius; targetSpeed = def.FireRate; targetAuto = def.AutoFire end
+        
+    else
+        -- Garante que armas não-modificáveis mantenham seus valores padrões sem quebrar
+        targetSpread = def.SpreadRadius; targetSpeed = def.FireRate; targetAuto = def.AutoFire
     end
     
     local gunStates = item:FindFirstChild("GunStates")
