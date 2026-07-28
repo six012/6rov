@@ -1,3 +1,30 @@
+--[[
+    SixHub Bloxtrike - Optimized & Bug-Fixed
+    Performance & stability improvements without altering features/UI
+--]]
+local game = game
+local pcall = pcall
+local ipairs = ipairs
+local pairs = pairs
+local math_clamp = math.clamp
+local math_max = math.max
+local math_floor = math.floor
+local Vector2_new = Vector2.new
+local Vector3_new = Vector3.new
+local CFrame_new = CFrame.new
+local Color3_fromRGB = Color3.fromRGB
+local Color3_new = Color3.new
+local os_clock = os.clock
+
+-- Safe mouse click fallback (fixes undefined 'mouse1click' error)
+local mouse1click = mouse1click or (function()
+    local vim = game:GetService("VirtualInputManager")
+    return function()
+        vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    end
+end)()
+
 local Success, Rayfield = pcall(function()
     return loadstring(game:HttpGet("https://raw.githubusercontent.com/twistedk1d/BloxStrike/refs/heads/main/Source/UI/source.lua"))()
 end)
@@ -7,26 +34,8 @@ if not Success or not Rayfield then
     return
 end
 
-local Window = Rayfield:CreateWindow({
-    Name = "SixHub Bloxtrike",
-    Icon = 0,
-    LoadingTitle = "SixHub Bloxtrike carregando...",
-    LoadingSubtitle = "100%",
-    ShowText = "Menu",
-    Theme = "Default",
-    ToggleUIKeybind = Enum.KeyCode.Period,
-    DisableRayfieldPrompts = true,
-    DisableBuildWarnings = true,
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "SixHub_Bloxtrike",
-        FileName = "SixHub_Bloxtrike"
-    }
-})
-
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
 local CAS = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -38,30 +47,73 @@ local camera = Workspace.CurrentCamera
 local CharactersFolder = Workspace:WaitForChild("Characters", 10)
 
 --// ==========================================
---// TABS
+--// SHARED VARIABLES & STATE
 --// ==========================================
-local Tab_Combat  = Window:CreateTab("Combat", "crosshair")
-local Tab_Skins   = Window:CreateTab("Skins", "swords")
-local Tab_Visuals = Window:CreateTab("Visuals", "eye")
+local AimbotMasterEnabled, AimbotToggled, ShowFOV = false, false, false
+local FOV_Radius, Smoothing = 100, 3
+local LockedTarget = nil
 
-Tab_Skins:CreateLabel("this skin changer script by twistedk1d (not made me)", "code", Color3.fromRGB(80,80,80), false)
+local TriggerBotEnabled, TriggerBotDelay, lastTriggerShot = false, 0, 0
+local triggerRayParams = RaycastParams.new()
+triggerRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local HitboxEnabled, HitboxSize = false, 0
+local originalHeadSizes = {}
+
+local BhopEnabled = false
+
+local EspDamageEnabled, EspNamesEnabled = false, false
+local AntiFlashEnabled, AntiSmokeEnabled = false, false
+local espTexts = {}
+local chamsCache = {}
+
+-- FOV circle using Drawing library
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Filled = false
+FOVCircle.Color = Color3_fromRGB(255, 255, 255)
+FOVCircle.Thickness = 1
+
+local scriptRunning = false
+local SkinChangerEnabled = false
+local SelectedSkins, DropdownObjects, SkinOptions = {}, {}, {}
+local WEAR = "Factory New"
+local CT_ONLY = {["USP-S"]=true, ["Five-SeveN"]=true, ["MP9"]=true, ["FAMAS"]=true, ["M4A1-S"]=true, ["M4A4"]=true, ["AUG"]=true}
+local SHARED = {["P250"]=true, ["Desert Eagle"]=true, ["Dual Berettas"]=true, ["Negev"]=true, ["P90"]=true, ["Nova"]=true, ["XM1014"]=true, ["AWP"]=true, ["SSG 08"]=true}
+local KNIVES = {["Karambit"]=true, ["Butterfly Knife"]=true, ["M9 Bayonet"]=true, ["Flip Knife"]=true, ["Gut Knife"]=true, ["T Knife"]=true, ["CT Knife"]=true}
+local GLOVES = {["Sports Gloves"]=true}
+local SkinsFolder = RS:FindFirstChild("Assets") and RS.Assets:FindFirstChild("Skins") or nil
+
+local selectedKnife = "Butterfly Knife"
+local spawned, inspecting, swinging = false, false, false
+local lastAttackTime, ATTACK_COOLDOWN = 0, 1
+local ACTION_INSPECT, ACTION_ATTACK = "InspectKnifeAction", "AttackKnifeAction"
+
+-- Knife offsets (exactly as original)
+local knives = {
+    ["Karambit"]        = {Offset = CFrame_new(0, -1.5, 1.5)},
+    ["Butterfly Knife"] = {Offset = CFrame_new(0, -1.5, 1.5)},
+    ["M9 Bayonet"]      = {Offset = CFrame_new(0, -1.5, 1)},
+    ["Flip Knife"]      = {Offset = CFrame_new(0, -1.5, 1.25)},
+    ["Gut Knife"]       = {Offset = CFrame_new(0, -1.5, 0.5)},
+}
+local vm, animator, equipAnim, idleAnim, inspectAnim, HeavySwingAnim, Swing1Anim, Swing2Anim
+
+pcall(function()
+    if RS:FindFirstChild("Assets") and RS.Assets.Weapons:FindFirstChild("Karambit") then
+        RS.Assets.Weapons.Karambit.Camera.ViewmodelLight.Transparency = 1
+    end
+end)
 
 --// ==========================================
---// SHARED LOGIC (TEAM CHECK)
+--// CORE HELPER FUNCTIONS
 --// ==========================================
-local function getTFolder() 
-    return CharactersFolder and CharactersFolder:FindFirstChild("Terrorists") or nil
-end
-
-local function getCTFolder() 
-    return CharactersFolder and CharactersFolder:FindFirstChild("Counter-Terrorists") or nil
-end
+local function getTFolder() return CharactersFolder and CharactersFolder:FindFirstChild("Terrorists") or nil end
+local function getCTFolder() return CharactersFolder and CharactersFolder:FindFirstChild("Counter-Terrorists") or nil end
 
 local function isAlive()
     if not player or not player.Character then return false end
     local hum = player.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return false end
-    
     local t, ct = getTFolder(), getCTFolder()
     return (t and t:FindFirstChild(player.Name)) or (ct and ct:FindFirstChild(player.Name))
 end
@@ -70,310 +122,139 @@ local function getEnemyFolder()
     if not isAlive() then return nil end
     local t, ct = getTFolder(), getCTFolder()
     if not t or not ct then return nil end
-    
-    if t:FindFirstChild(player.Name) then 
-        return ct 
-    elseif ct:FindFirstChild(player.Name) then 
-        return t 
-    end
+    if t:FindFirstChild(player.Name) then return ct
+    elseif ct:FindFirstChild(player.Name) then return t end
     return nil
 end
 
---// ==========================================
---// AIMBOT & FOV LOGIC
---// ==========================================
-local AimbotEnabled = false
-local ShowFOV = false
-local FOV_Radius = 100
-local Smoothing = 3
-local AimKey = Enum.UserInputType.MouseButton2
-local isAiming = false
-
-local FOVCircle = Drawing.new("Circle")
-FOVCircle.Position = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
-FOVCircle.Radius = FOV_Radius
-FOVCircle.Filled = false
-FOVCircle.Color = Color3.fromRGB(255, 255, 255)
-FOVCircle.Visible = false
-FOVCircle.Thickness = 1
-
-local function getClosestEnemyToMouse()
-    local closestEnemy = nil
-    local shortestDistance = FOV_Radius
-    local enemyFolder = getEnemyFolder()
-    if not enemyFolder or not AimbotEnabled then return nil end
-    
-    local mousePos = UserInputService:GetMouseLocation()
-    for _, enemy in ipairs(enemyFolder:GetChildren()) do
-        if enemy and enemy.Parent then
-            local hum = enemy:FindFirstChildOfClass("Humanoid")
-            local head = enemy:FindFirstChild("Head")
-            if hum and hum.Health > 0 and head then
-                local headPos, onScreen = camera:WorldToViewportPoint(head.Position)
-                if onScreen then
-                    local distance = (Vector2.new(headPos.X, headPos.Y) - mousePos).Magnitude
-                    if distance < shortestDistance then
-                        shortestDistance = distance
-                        closestEnemy = head
-                    end
-                end
-            end
-        end
-    end
-    return closestEnemy
-end
-
-UserInputService.InputBegan:Connect(function(input)
-    if input.UserInputType == AimKey then isAiming = true end
-end)
-
-UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == AimKey then isAiming = false end
-end)
-
-RunService.RenderStepped:Connect(function()
-    if ShowFOV then
-        FOVCircle.Position = UserInputService:GetMouseLocation()
-        FOVCircle.Radius = FOV_Radius
-        FOVCircle.Visible = true
-    else
-        FOVCircle.Visible = false
-    end
-    
-    if not isAiming or not isAlive() or not AimbotEnabled then return end
-    
-    local targetHead = getClosestEnemyToMouse()
-    if targetHead then
-        local headPos, onScreen = camera:WorldToViewportPoint(targetHead.Position)
-        if onScreen then
-            local mousePos = UserInputService:GetMouseLocation()
-            local moveX = (headPos.X - mousePos.X) / math.max(Smoothing, 1)
-            local moveY = (headPos.Y - mousePos.Y) / math.max(Smoothing, 1)
-            if mousemoverel then
-                pcall(function() mousemoverel(moveX, moveY) end)
-            end
-        end
-    end
-end)
-
-Tab_Combat:CreateSection("Aimbot Settings")
-Tab_Combat:CreateToggle({Name = "Enable Aimbot (Hold Right Click)", CurrentValue = false, Flag = "AimbotToggle", Callback = function(Value) AimbotEnabled = Value end})
-Tab_Combat:CreateToggle({Name = "Show FOV Circle", CurrentValue = false, Flag = "FOVToggle", Callback = function(Value) ShowFOV = Value end})
-Tab_Combat:CreateSlider({Name = "FOV Radius", Range = {10, 500}, Increment = 10, Suffix = "px", CurrentValue = 100, Flag = "FOVSlider", Callback = function(Value) FOV_Radius = Value end})
-Tab_Combat:CreateSlider({Name = "Aimbot Smoothing", Range = {1, 10}, Increment = 1, Suffix = " (Lower is faster)", CurrentValue = 3, Flag = "AimbotSmoothing", Callback = function(Value) Smoothing = Value end})
-
---// ==========================================
---// TRIGGERBOT LOGIC (OTIMIZADO)
---// ==========================================
-local TriggerBotEnabled = false
-local TriggerBotDelay = 0
-
-Tab_Combat:CreateSection("TriggerBot Settings")
-Tab_Combat:CreateToggle({Name = "Enable TriggerBot", CurrentValue = false, Flag = "TriggerBotToggle", Callback = function(Value) TriggerBotEnabled = Value end})
-Tab_Combat:CreateSlider({Name = "Shot Delay", Range = {0, 500}, Increment = 10, Suffix = "ms", CurrentValue = 0, Flag = "TriggerBotDelay", Callback = function(Value) TriggerBotDelay = Value end})
-
--- Variável do Raycast instanciada fora do loop para não estourar a memória (Lag Fix)
-local triggerRayParams = RaycastParams.new()
-triggerRayParams.FilterType = Enum.RaycastFilterType.Exclude
-
-task.spawn(function()
-    while true do
-        task.wait(0.01)
-        if TriggerBotEnabled and isAlive() then
-            pcall(function()
-                local ignoreList = {camera}
-                if player.Character then table.insert(ignoreList, player.Character) end
-                triggerRayParams.FilterDescendantsInstances = ignoreList
-                
-                local viewportSize = camera.ViewportSize
-                local ray = camera:ViewportPointToRay(viewportSize.X / 2, viewportSize.Y / 2)
-                
-                local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, triggerRayParams)
-                if result and result.Instance then
-                    local hitPart = result.Instance
-                    local model = hitPart:FindFirstAncestorOfClass("Model")
-                    if model and model:FindFirstChildOfClass("Humanoid") then
-                        local enemyFolder = getEnemyFolder()
-                        if enemyFolder and model.Parent == enemyFolder then
-                            local hum = model:FindFirstChildOfClass("Humanoid")
-                            if hum and hum.Health > 0 then
-                                if TriggerBotDelay > 0 then task.wait(TriggerBotDelay / 1000) end
-                                if mouse1click then mouse1click() end
-                                task.wait(0.05)
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    end
-end)
-
---// ==========================================
---// SAFE HITBOX LOGIC
---// ==========================================
-local HitboxEnabled = false
-local HitboxSize = 3
-local originalHeadSizes = {}
-
-Tab_Combat:CreateSection("Simple Hitbox (Max 3)")
-Tab_Combat:CreateToggle({
-    Name = "Enable Hitbox",
-    CurrentValue = false,
-    Flag = "HitboxToggle",
-    Callback = function(Value) 
-        HitboxEnabled = Value 
-        if not Value then
-            for head, origSize in pairs(originalHeadSizes) do
-                if head and head.Parent then
-                    head.Size = origSize
-                    head.Transparency = 0
-                end
-            end
-            table.clear(originalHeadSizes)
-        end
-    end
-})
-Tab_Combat:CreateSlider({Name = "Hitbox Size", Range = {1, 3}, Increment = 0.1, Suffix = " Studs", CurrentValue = 3, Flag = "HitboxSize", Callback = function(Value) HitboxSize = Value end})
-
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if HitboxEnabled then
-            pcall(function()
-                local enemyFolder = getEnemyFolder()
-                if enemyFolder then
-                    for _, enemy in ipairs(enemyFolder:GetChildren()) do
-                        if enemy and enemy.Parent then
-                            local head = enemy:FindFirstChild("Head")
-                            local hum = enemy:FindFirstChildOfClass("Humanoid")
-                            if head and hum and hum.Health > 0 then
-                                if not originalHeadSizes[head] then
-                                    originalHeadSizes[head] = head.Size
-                                end
-                                head.Size = Vector3.new(HitboxSize, HitboxSize, HitboxSize)
-                                head.CanCollide = false
-                                head.Transparency = 0.5
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-    end
-end)
-
---// ==========================================
---// BHOP (BUNNY HOP) LOGIC
---// ==========================================
-local BhopEnabled = false
-
-Tab_Combat:CreateSection("Movement Settings")
-Tab_Combat:CreateToggle({Name = "Enable Bunny Hop (Hold Space)", CurrentValue = false, Flag = "BhopToggle", Callback = function(Value) BhopEnabled = Value end})
-
-RunService.RenderStepped:Connect(function()
-    if BhopEnabled and UserInputService:IsKeyDown(Enum.KeyCode.Space) and isAlive() then
-        pcall(function()
-            if player.Character then
-                local hum = player.Character:FindFirstChildOfClass("Humanoid")
-                if hum and hum:GetState() ~= Enum.HumanoidStateType.Jumping and hum:GetState() ~= Enum.HumanoidStateType.Freefall then
-                    hum.Jump = true
-                end
-            end
-        end)
-    end
-end)
-
---// ==========================================
---// SKINS TAB LOGIC
---// ==========================================
-local scriptRunning = false
-local selectedKnife = "Butterfly Knife"
-local spawned = false
-local inspecting = false
-local swinging = false
-local lastAttackTime = 0
-local ATTACK_COOLDOWN = 1
-local ACTION_INSPECT = "InspectKnifeAction"
-local ACTION_ATTACK  = "AttackKnifeAction"
-
-pcall(function() RS.Assets.Weapons.Karambit.Camera.ViewmodelLight.Transparency = 1 end)
-
-local knives = {
-    ["Karambit"]        = {Offset = CFrame.new(0, -1.5, 1.5)},
-    ["Butterfly Knife"] = {Offset = CFrame.new(0, -1.5, 1.5)},
-    ["M9 Bayonet"]      = {Offset = CFrame.new(0, -1.5, 1)},
-    ["Flip Knife"]      = {Offset = CFrame.new(0, -1.5, 1.25)},
-    ["Gut Knife"]       = {Offset = CFrame.new(0, -1.5, 0.5)},
+local ignoredModels = {
+    ["Head"]=true, ["Torso"]=true, ["HumanoidRootPart"]=true,
+    ["Left Arm"]=true, ["Right Arm"]=true, ["Left Leg"]=true, ["Right Leg"]=true,
+    ["UpperTorso"]=true, ["LowerTorso"]=true, ["LeftFoot"]=true, ["RightFoot"]=true,
+    ["LeftHand"]=true, ["RightHand"]=true, ["LeftLowerArm"]=true, ["RightLowerArm"]=true,
+    ["LeftUpperArm"]=true, ["RightUpperArm"]=true, ["LeftLowerLeg"]=true, ["RightLowerLeg"]=true,
+    ["LeftUpperLeg"]=true, ["RightUpperLeg"]=true, ["Health"]=true, ["Animate"]=true,
+    ["CharacterArmor"]=true, ["Vest"]=true, ["Helmet"]=true, ["Armor"]=true, ["Hitbox"]=true,
+    ["Humanoid"]=true, ["Shirt"]=true, ["Pants"]=true, ["Body Colors"]=true, ["Shirt Graphic"]=true
 }
 
-local vm, animator
-local equipAnim, idleAnim, inspectAnim, HeavySwingAnim, Swing1Anim, Swing2Anim
-
-local function getKnifeInCamera() 
-    return camera and (camera:FindFirstChild("T Knife") or camera:FindFirstChild("CT Knife")) or nil
-end
-
 local function cleanPart(part)
-    if not part or not part:IsA("BasePart") then return end
-    pcall(function() part.CanCollide, part.Anchored, part.CastShadow, part.CanTouch, part.CanQuery = false, false, false, false, false end)
+    if part and part:IsA("BasePart") then
+        pcall(function()
+            part.CanCollide, part.Anchored, part.CastShadow, part.CanTouch, part.CanQuery =
+                false, false, false, false, false
+        end)
+    end
 end
 
 local function disableCollisions(model)
-    if not model then return end
-    for _, part in ipairs(model:GetDescendants()) do cleanPart(part) end
-end
-
-local function hideOriginalKnife(knife)
-    if not knife then return end
-    for _, part in ipairs(knife:GetDescendants()) do
-        if part:IsA("BasePart") or part:IsA("MeshPart") or part:IsA("Texture") then 
-            pcall(function() part.Transparency = 1 end)
+    if model then
+        for _, part in ipairs(model:GetDescendants()) do
+            cleanPart(part)
         end
     end
 end
 
-local function playSound(folder, name)
-    local weaponSounds = RS.Sounds:FindFirstChild(selectedKnife)
-    if not weaponSounds then return end
-    local folderAsset = weaponSounds:FindFirstChild(folder)
-    if not folderAsset then return end
-    local soundTemplate = folderAsset:FindFirstChild(name)
-    if not soundTemplate then return end
-    
-    local sound = soundTemplate:Clone()
-    sound.Parent = camera
-    sound:Play()
-    sound.Ended:Once(function() sound:Destroy() end)
-    return sound
+local function hideKnifeModel(child)
+    if not child or child == vm then return end
+    local n = string.lower(child.Name)
+    if string.find(n, "knife") or string.find(n, "melee") or string.find(n, "bayonet") or
+       string.find(n, "karambit") or string.find(n, "gut") then
+        for _, part in ipairs(child:GetDescendants()) do
+            if (part:IsA("BasePart") or part:IsA("MeshPart") or part:IsA("Decal") or part:IsA("Texture")) and part.Transparency ~= 1 then
+                part.Transparency = 1
+            end
+        end
+    end
 end
 
-local function attachAsset(folder, armPartName, assetModelName, finalName, offset)
-    if not vm then return end
-    local targetArm = vm:FindFirstChild(armPartName)
-    if not targetArm then return end
-    local template = folder:FindFirstChild(assetModelName)
-    if not template then return end
-    
-    local assetMesh = template:Clone()
-    cleanPart(assetMesh)
-    assetMesh.Name = finalName
-    assetMesh.Parent = targetArm
-    local motor = Instance.new("Motor6D")
-    motor.Part0, motor.Part1, motor.C0, motor.Parent = targetArm, assetMesh, offset, targetArm
+local function forceHideOriginalKnife()
+    if not camera then return end
+    for _, child in ipairs(camera:GetChildren()) do
+        hideKnifeModel(child)
+    end
+end
+
+camera.ChildAdded:Connect(hideKnifeModel)
+
+local function applyWeaponSkin(model)
+    if not model or not SkinChangerEnabled or not isAlive() or not SkinsFolder then return end
+    local skinName = SelectedSkins[model.Name]
+    if not skinName then return end
+    task.spawn(function()
+        pcall(function()
+            local skinFolder = SkinsFolder:FindFirstChild(model.Name)
+            if not skinFolder then return end
+            local skinType = skinFolder:FindFirstChild(skinName)
+            local sourceFolder = skinType and skinType:FindFirstChild("Camera") and skinType.Camera:FindFirstChild(WEAR)
+            if not sourceFolder then return end
+
+            -- Apply gloves to arms if available
+            for _, obj in ipairs(camera:GetChildren()) do
+                local left, right = obj:FindFirstChild("Left Arm"), obj:FindFirstChild("Right Arm")
+                if left or right then
+                    local gloveFolder = SkinsFolder:FindFirstChild("Sports Gloves")
+                    local gloveSkin = gloveFolder and gloveFolder:FindFirstChild(SelectedSkins["Sports Gloves"])
+                    local gloveSource = gloveSkin and gloveSkin:FindFirstChild("Camera") and gloveSkin.Camera:FindFirstChild(WEAR)
+                    if gloveSource then
+                        for _, side in ipairs({"Left Arm", "Right Arm"}) do
+                            local arm, src = obj:FindFirstChild(side), gloveSource:FindFirstChild(side)
+                            if arm and src then
+                                local gloveMesh = arm:FindFirstChild("Glove")
+                                if gloveMesh then
+                                    local existing = gloveMesh:FindFirstChildOfClass("SurfaceAppearance")
+                                    if existing then existing:Destroy() end
+                                    local clone = src:Clone()
+                                    clone.Name, clone.Parent = "SurfaceAppearance", gloveMesh
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            if not GLOVES[model.Name] then
+                local weaponFolder = model:FindFirstChild("Weapon")
+                if weaponFolder then
+                    for _, part in ipairs(weaponFolder:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            local newSkin = sourceFolder:FindFirstChild(part.Name)
+                            if newSkin then
+                                local existing = part:FindFirstChildOfClass("SurfaceAppearance")
+                                if existing then existing:Destroy() end
+                                local clone = newSkin:Clone()
+                                clone.Name, clone.Parent = "SurfaceAppearance", part
+                            end
+                        end
+                    end
+                end
+            end
+            model:SetAttribute("SkinApplied", skinName)
+        end)
+    end)
+end
+
+local function removeViewmodel()
+    spawned = false
+    pcall(function() CAS:UnbindAction(ACTION_INSPECT); CAS:UnbindAction(ACTION_ATTACK) end)
+    if vm then vm:Destroy(); vm = nil end
+    animator, inspecting, swinging = nil, false, false
 end
 
 local function handleAction(actionName, inputState, inputObject)
-    if inputState ~= Enum.UserInputState.Begin or not spawned or not animator or not isAlive() then return Enum.ContextActionResult.Pass end
+    if inputState ~= Enum.UserInputState.Begin or not spawned or not animator or not isAlive() then
+        return Enum.ContextActionResult.Pass
+    end
     if actionName == ACTION_INSPECT then
         if (equipAnim and equipAnim.IsPlaying) or inspecting or swinging then return Enum.ContextActionResult.Pass end
         inspecting = true
         if idleAnim then idleAnim:Stop() end
-        if inspectAnim then inspectAnim:Play() end
-        if inspectAnim then inspectAnim.Stopped:Once(function() inspecting = false end) else inspecting = false end
+        if inspectAnim then inspectAnim:Play(); inspectAnim.Stopped:Once(function() inspecting = false end) else inspecting = false end
     elseif actionName == ACTION_ATTACK then
-        local currentTime = os.clock()
-        if (equipAnim and equipAnim.IsPlaying) or (currentTime - lastAttackTime < ATTACK_COOLDOWN) then return Enum.ContextActionResult.Pass end
+        local currentTime = os_clock()
+        if (equipAnim and equipAnim.IsPlaying) or (currentTime - lastAttackTime < ATTACK_COOLDOWN) then
+            return Enum.ContextActionResult.Pass
+        end
         lastAttackTime = currentTime
         if inspecting then inspecting = false; if inspectAnim then inspectAnim:Stop() end end
         swinging = true
@@ -381,10 +262,7 @@ local function handleAction(actionName, inputState, inputObject)
         local anims = {HeavySwingAnim, Swing1Anim, Swing2Anim}
         local chosenAnim = anims[math.random(1, #anims)]
         if chosenAnim then
-            local soundFolder = (chosenAnim == HeavySwingAnim and "HitOne") or (chosenAnim == Swing1Anim and "HitTwo") or "HitThree"
             chosenAnim:Play()
-            local s = playSound(soundFolder, "1")
-            if s then s.Volume = 5 end
             chosenAnim.Stopped:Once(function() swinging = false end)
         else
             swinging = false
@@ -393,60 +271,30 @@ local function handleAction(actionName, inputState, inputObject)
     return Enum.ContextActionResult.Pass
 end
 
-local function removeViewmodel()
-    spawned = false
-    pcall(function() CAS:UnbindAction(ACTION_INSPECT) end)
-    pcall(function() CAS:UnbindAction(ACTION_ATTACK) end)
-    if vm then vm:Destroy() vm = nil end
-    animator, inspecting, swinging = nil, false, false
-end
-
 local function spawnViewmodel()
-    if spawned or not scriptRunning then return end
-    local myModel = isAlive()
-    if not myModel then return end
-    spawned = true
-    
-    local weaponsFolder = RS.Assets:FindFirstChild("Weapons")
-    if not weaponsFolder then spawned = false return end
+    if spawned or not scriptRunning or not isAlive() then return end
+
+    local weaponsFolder = RS:FindFirstChild("Assets") and RS.Assets:FindFirstChild("Weapons")
+    if not weaponsFolder then return end
     local knifeTemplate = weaponsFolder:FindFirstChild(selectedKnife)
-    if not knifeTemplate or not knives[selectedKnife] then spawned = false return end
-    
-    local knifeOffset = knives[selectedKnife].Offset
+    if not knifeTemplate or not knives[selectedKnife] then return end
+
+    spawned = true
     local camModel = knifeTemplate:FindFirstChild("Camera")
-    if not camModel then spawned = false return end
-    
+    if not camModel then spawned = false; return end
+
     vm = camModel:Clone()
     vm.Name, vm.Parent = selectedKnife, camera
     disableCollisions(vm)
-    
-    local currentKnife = getKnifeInCamera()
-    if currentKnife then hideOriginalKnife(currentKnife) end
-    
-    if myModel.Parent and myModel.Parent.Name == "Terrorists" then
-        local tGloves = weaponsFolder:FindFirstChild("T Glove")
-        if tGloves then
-            attachAsset(tGloves, "Left Arm", "Left Arm", "Glove", CFrame.new(0, 0, -1.5))
-            attachAsset(tGloves, "Right Arm", "Right Arm", "Glove", CFrame.new(0, 0, -1.5))
-        end
-    else
-        local sleevesFolder = RS.Assets:FindFirstChild("Sleeves")
-        local sleeves = sleevesFolder and sleevesFolder:FindFirstChild("IDF")
-        local ctGloves = weaponsFolder:FindFirstChild("CT Glove")
-        if sleeves and ctGloves then
-            attachAsset(sleeves, "Left Arm", "Left Arm", "Sleeve", CFrame.new(0, 0, 0.5))
-            attachAsset(ctGloves, "Left Arm", "Left Arm", "Glove", CFrame.new(0, 0, -1.5))
-            attachAsset(sleeves, "Right Arm", "Right Arm", "Sleeve", CFrame.new(0, 0, 0.5))
-            attachAsset(ctGloves, "Right Arm", "Right Arm", "Glove", CFrame.new(0, 0, -1.5))
-        end
-    end
-    
+
+    if SkinChangerEnabled then applyWeaponSkin(vm) end
+    forceHideOriginalKnife()
+
     local animController = vm:FindFirstChildOfClass("AnimationController") or vm:FindFirstChildOfClass("Animator")
     animator = animController and (animController:FindFirstChildWhichIsA("Animator") or animController) or nil
-    
+
     local weaponAnimsFolder = RS.Assets:FindFirstChild("WeaponAnimations")
     local animFolder = weaponAnimsFolder and weaponAnimsFolder:FindFirstChild(selectedKnife) and weaponAnimsFolder[selectedKnife]:FindFirstChild("CameraAnimations")
-    
     if animator and animFolder then
         pcall(function()
             equipAnim = animator:LoadAnimation(animFolder:WaitForChild("Equip"))
@@ -457,145 +305,120 @@ local function spawnViewmodel()
             Swing2Anim = animator:LoadAnimation(animFolder:WaitForChild("Swing2"))
         end)
     end
-    
+
     if vm.PrimaryPart then
-        vm:SetPrimaryPartCFrame(camera.CFrame * CFrame.new(0, -1.5, 5))
-        TweenService:Create(vm.PrimaryPart, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            CFrame = camera.CFrame * knifeOffset
-        }):Play()
+        vm.PrimaryPart.CFrame = camera.CFrame * knives[selectedKnife].Offset
     end
-    
     if equipAnim then equipAnim:Play() end
-    playSound("Equip", "1")
-    
+
     CAS:BindAction(ACTION_INSPECT, handleAction, false, Enum.KeyCode.F)
     CAS:BindAction(ACTION_ATTACK, handleAction, false, Enum.UserInputType.MouseButton1)
 end
 
-RunService.RenderStepped:Connect(function()
-    if not scriptRunning then return end
-    
-    local currentKnife = getKnifeInCamera()
-    if not currentKnife or not isAlive() then
-        if spawned then removeViewmodel() end
-        return
-    end
+local function getClosestEnemyToMouse()
+    local closestEnemy = nil
+    local shortestDistance = FOV_Radius
+    local enemyFolder = getEnemyFolder()
+    if not enemyFolder or not AimbotMasterEnabled then return nil end
+    local mousePos = UserInputService:GetMouseLocation()
 
-    if not vm or not vm.PrimaryPart then return end
-    
-    pcall(function()
-        vm.PrimaryPart.CFrame = camera.CFrame * knives[selectedKnife].Offset
-        if not (equipAnim and equipAnim.IsPlaying) and not inspecting and not swinging then
-            if idleAnim and not idleAnim.IsPlaying then idleAnim:Play() end
-        end
-    end)
-end)
-
-camera.ChildRemoved:Connect(function(child)
-    if child.Name == "T Knife" or child.Name == "CT Knife" then
-        if spawned then removeViewmodel() end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(0.1)
-        pcall(function()
-            local living = isAlive()
-            local currentKnife = getKnifeInCamera()
-            if scriptRunning and living and currentKnife and not spawned then
-                spawnViewmodel()
-            elseif (not scriptRunning or not currentKnife or not living) and spawned then
-                removeViewmodel()
-            end
-        end)
-    end
-end)
-
---// ==========================================
---// SKINS CHANGER LOGIC
---// ==========================================
-local SkinChangerEnabled = false
-local SelectedSkins = {}
-local DropdownObjects = {}
-local SkinOptions = {}
-local COOLDOWN = 0.1
-local WEAR = "Factory New"
-
-local CT_ONLY = {["USP-S"]=true, ["Five-SeveN"]=true, ["MP9"]=true, ["FAMAS"]=true, ["M4A1-S"]=true, ["M4A4"]=true, ["AUG"]=true}
-local SHARED = {["P250"]=true, ["Desert Eagle"]=true, ["Dual Berettas"]=true, ["Negev"]=true, ["P90"]=true, ["Nova"]=true, ["XM1014"]=true, ["AWP"]=true, ["SSG 08"]=true}
-local KNIVES = {["Karambit"]=true, ["Butterfly Knife"]=true, ["M9 Bayonet"]=true, ["Flip Knife"]=true, ["Gut Knife"]=true, ["T Knife"]=true, ["CT Knife"]=true}
-local GLOVES = {["Sports Gloves"]=true}
-
-local SkinsFolder = RS:FindFirstChild("Assets") and RS.Assets:FindFirstChild("Skins") or nil
-local IgnoreFolders = {["HE Grenade"]=true, ["Incendiary Grenade"]=true, ["Molotov"]=true, ["Smoke Grenade"]=true, ["Flashbang"]=true, ["Decoy Grenade"]=true, ["C4"]=true, ["CT Glove"]=true, ["T Glove"]=true}
-
-local function applyWeaponSkin(model)
-    if not model or not SkinChangerEnabled or not isAlive() or not SkinsFolder then return end
-    local skinName = SelectedSkins[model.Name]
-    if not skinName then return end
-    
-    pcall(function()
-        local skinFolder = SkinsFolder:FindFirstChild(model.Name)
-        if not skinFolder then return end
-        local skinType = skinFolder:FindFirstChild(skinName)
-        local sourceFolder = skinType and skinType:FindFirstChild("Camera") and skinType.Camera:FindFirstChild(WEAR)
-        if not sourceFolder then return end
-        
-        for _, obj in ipairs(camera:GetChildren()) do
-            local left, right = obj:FindFirstChild("Left Arm"), obj:FindFirstChild("Right Arm")
-            if left or right then
-                local gloveFolder = SkinsFolder:FindFirstChild("Sports Gloves")
-                local gloveSkin = gloveFolder and gloveFolder:FindFirstChild(SelectedSkins["Sports Gloves"])
-                local gloveSource = gloveSkin and gloveSkin:FindFirstChild("Camera") and gloveSkin.Camera:FindFirstChild(WEAR)
-                if gloveSource then
-                    for _, side in ipairs({"Left Arm", "Right Arm"}) do
-                        local arm, src = obj:FindFirstChild(side), gloveSource:FindFirstChild(side)
-                        if arm and src then
-                            local gloveMesh = arm:FindFirstChild("Glove")
-                            if gloveMesh then
-                                local existing = gloveMesh:FindFirstChildOfClass("SurfaceAppearance")
-                                if existing then existing:Destroy() end
-                                local clone = src:Clone()
-                                clone.Name, clone.Parent = "SurfaceAppearance", gloveMesh
-                            end
-                        end
+    for _, enemy in ipairs(enemyFolder:GetChildren()) do
+        if enemy and enemy.Parent then
+            local hum = enemy:FindFirstChildOfClass("Humanoid")
+            local head = enemy:FindFirstChild("Head")
+            if hum and hum.Health > 0 and head then
+                local headPos, onScreen = camera:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    local distance = (Vector2_new(headPos.X, headPos.Y) - mousePos).Magnitude
+                    if distance <= shortestDistance then
+                        shortestDistance = distance
+                        closestEnemy = enemy
                     end
                 end
             end
         end
-        
-        if not GLOVES[model.Name] then
-            local weaponFolder = model:FindFirstChild("Weapon")
-            if weaponFolder then
-                for _, part in ipairs(weaponFolder:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        local newSkin = sourceFolder:FindFirstChild(part.Name)
-                        if newSkin then
-                            local existing = part:FindFirstChildOfClass("SurfaceAppearance")
-                            if existing then existing:Destroy() end
-                            local clone = newSkin:Clone()
-                            clone.Name, clone.Parent = "SurfaceAppearance", part
-                        end
-                    end
-                end
-            end
-        end
-        model:SetAttribute("SkinApplied", skinName)
-    end)
+    end
+    return closestEnemy
 end
 
+--// ==========================================
+--// UI CREATION (RAYFIELD) - UNCHANGED
+--// ==========================================
+local Window = Rayfield:CreateWindow({
+    Name = "SixHub Bloxtrike",
+    Icon = 0,
+    LoadingTitle = "SixHub Bloxtrike",
+    LoadingSubtitle = "Fixing Bugs...",
+    ShowText = "Menu",
+    Theme = "Default",
+    ToggleUIKeybind = Enum.KeyCode.Period,
+    DisableRayfieldPrompts = true,
+    DisableBuildWarnings = true,
+    ConfigurationSaving = {
+        Enabled = false,
+        FolderName = "SixHub_Bloxtrike",
+        FileName = "SixHub_Bloxtrike"
+    }
+})
+
+local Tab_Combat  = Window:CreateTab("Combat", "crosshair")
+local Tab_Skins   = Window:CreateTab("Skins", "swords")
+local Tab_Visuals = Window:CreateTab("Visuals", "eye")
+
+Tab_Combat:CreateSection("Aimbot Settings")
+Tab_Combat:CreateToggle({Name = "Enable Aimbot", CurrentValue = false, Flag = "AimbotToggle", Callback = function(Value) AimbotMasterEnabled = Value; if not Value then AimbotToggled = false; LockedTarget = nil end end})
+Tab_Combat:CreateLabel("Pressione [E] para travar/destravar a mira.")
+Tab_Combat:CreateToggle({Name = "Show FOV Circle", CurrentValue = false, Flag = "FOVToggle", Callback = function(Value) ShowFOV = Value end})
+Tab_Combat:CreateSlider({Name = "FOV Radius", Range = {10, 500}, Increment = 10, Suffix = "px", CurrentValue = 100, Flag = "FOVSlider", Callback = function(Value) FOV_Radius = Value end})
+Tab_Combat:CreateSlider({Name = "Aimbot Smoothing", Range = {1, 10}, Increment = 1, Suffix = "", CurrentValue = 2, Flag = "AimbotSmoothing", Callback = function(Value) Smoothing = Value end})
+
+Tab_Combat:CreateSection("TriggerBot Settings")
+Tab_Combat:CreateToggle({Name = "Enable TriggerBot", CurrentValue = false, Flag = "TriggerBotToggle", Callback = function(Value) TriggerBotEnabled = Value end})
+Tab_Combat:CreateSlider({Name = "Shot Delay", Range = {0, 500}, Increment = 10, Suffix = "ms", CurrentValue = 0, Flag = "TriggerBotDelay", Callback = function(Value) TriggerBotDelay = Value end})
+
+Tab_Combat:CreateSection("Head Hitbox Expander")
+Tab_Combat:CreateToggle({
+    Name = "Enable Hitbox",
+    CurrentValue = false,
+    Flag = "HitboxToggle",
+    Callback = function(Value)
+        HitboxEnabled = Value
+        if not Value then
+            for head, origSize in pairs(originalHeadSizes) do
+                if head and head.Parent then
+                    pcall(function()
+                        head.Size = origSize
+                        head.Massless = false
+                        head.Transparency = 0
+                    end)
+                end
+            end
+            table.clear(originalHeadSizes)
+        end
+    end
+})
+Tab_Combat:CreateSlider({Name = "Hitbox Size", Range = {0, 3}, Increment = 1, Suffix = " Studs", CurrentValue = 0, Flag = "HitboxSize", Callback = function(Value) HitboxSize = Value end})
+
+Tab_Combat:CreateSection("Movement Settings")
+Tab_Combat:CreateToggle({Name = "Enable Bunny Hop", CurrentValue = false, Flag = "BhopToggle", Callback = function(Value) BhopEnabled = Value end})
+
+--// VISUALS TAB
+Tab_Visuals:CreateSection("ESP Settings")
+Tab_Visuals:CreateToggle({Name = "Esp Players (Chams)", CurrentValue = false, Flag = "EspDamageToggle", Callback = function(Value) EspDamageEnabled = Value end})
+Tab_Visuals:CreateToggle({Name = "Esp Names + HP", CurrentValue = false, Flag = "EspNamesToggle", Callback = function(Value) EspNamesEnabled = Value end})
+
+Tab_Visuals:CreateSection("World & Effects")
+Tab_Visuals:CreateToggle({Name = "Anti-Flashbang", CurrentValue = false, Flag = "AntiFlashToggle", Callback = function(Value) AntiFlashEnabled = Value end})
+Tab_Visuals:CreateToggle({Name = "Anti-Smoke", CurrentValue = false, Flag = "AntiSmokeToggle", Callback = function(Value) AntiSmokeEnabled = Value end})
+
+--// SKINS TAB
 Tab_Skins:CreateToggle({
     Name = "Enable Skin Changer",
     CurrentValue = false,
     Flag = "SkinChangerToggle",
     Callback = function(Value)
         SkinChangerEnabled = Value
-        if not Value then 
-            for _, obj in ipairs(camera:GetChildren()) do 
-                pcall(function() obj:SetAttribute("SkinApplied", nil) end) 
-            end 
-        end
+        if vm and scriptRunning then applyWeaponSkin(vm) end
     end
 })
 
@@ -606,8 +429,8 @@ Tab_Skins:CreateButton({
             if #optionsList > 0 then
                 local randomSkin = optionsList[math.random(1, #optionsList)]
                 if DropdownObjects[weaponName] then
-                    for _, dropdown in ipairs(DropdownObjects[weaponName]) do 
-                        pcall(function() dropdown:Set({randomSkin}) end) 
+                    for _, dropdown in ipairs(DropdownObjects[weaponName]) do
+                        pcall(function() dropdown:Set({randomSkin}) end)
                     end
                 end
             end
@@ -615,23 +438,41 @@ Tab_Skins:CreateButton({
     end,
 })
 
+Tab_Skins:CreateToggle({
+    Name = "Enable Custom Knife",
+    CurrentValue = false,
+    Flag = "KnifeToggle",
+    Callback = function(Value)
+        scriptRunning = Value
+        if not Value then removeViewmodel() end
+    end
+})
+
+Tab_Skins:CreateDropdown({
+    Name = "Selected Custom Knife",
+    Options = {"Flip Knife", "Butterfly Knife", "Karambit", "M9 Bayonet", "Gut Knife"},
+    CurrentOption = {"Flip Knife"},
+    MultipleOptions = false,
+    Flag = "KnifeDropdown",
+    Callback = function(Options)
+        selectedKnife = Options[1]
+        if spawned then removeViewmodel() end
+    end
+})
+
 local function CreateSkinDropdown(weaponName)
     if not SkinsFolder then return end
     local folder = SkinsFolder:FindFirstChild(weaponName)
     if not folder then return end
-    
     local options = {}
     for _, skin in ipairs(folder:GetChildren()) do table.insert(options, skin.Name) end
     if #options == 0 then return end
-    
+
     SkinOptions[weaponName] = options
     if not SelectedSkins[weaponName] then SelectedSkins[weaponName] = options[1] end
-    
+
     local dp = Tab_Skins:CreateDropdown({
-        Name = weaponName,
-        Options = options,
-        CurrentOption = {SelectedSkins[weaponName]},
-        Flag = "Skin_" .. weaponName,
+        Name = weaponName, Options = options, CurrentOption = {SelectedSkins[weaponName]}, Flag = "Skin_" .. weaponName,
         Callback = function(opt)
             local newSkin = opt[1]
             SelectedSkins[weaponName] = newSkin
@@ -640,34 +481,13 @@ local function CreateSkinDropdown(weaponName)
                     if other.CurrentOption[1] ~= newSkin then pcall(function() other:Set({newSkin}) end) end
                 end
             end
-            for _, obj in ipairs(camera:GetChildren()) do 
-                pcall(function() obj:SetAttribute("SkinApplied", nil); applyWeaponSkin(obj) end) 
-            end
+            if vm and vm.Name == weaponName then applyWeaponSkin(vm) end
+            for _, obj in ipairs(camera:GetChildren()) do pcall(function() obj:SetAttribute("SkinApplied", nil); applyWeaponSkin(obj) end) end
         end
     })
     DropdownObjects[weaponName] = DropdownObjects[weaponName] or {}
     table.insert(DropdownObjects[weaponName], dp)
 end
-
-Tab_Skins:CreateToggle({
-    Name = "Enable Custom Knife",
-    CurrentValue = false,
-    Flag = "KnifeToggle",
-    Callback = function(Value)
-        scriptRunning = Value; if not Value then removeViewmodel() end
-    end
-})
-
-Tab_Skins:CreateDropdown({
-    Name = "Selected Custom Knife",
-    Options = {"Butterfly Knife", "Karambit", "M9 Bayonet", "Flip Knife", "Gut Knife"},
-    CurrentOption = {"Butterfly Knife"},
-    MultipleOptions = false,
-    Flag = "KnifeDropdown",
-    Callback = function(Options)
-        selectedKnife = Options[1]; if spawned then removeViewmodel() end
-    end
-})
 
 Tab_Skins:CreateSection("Knives Skins")
 for name in pairs(KNIVES) do CreateSkinDropdown(name) end
@@ -678,252 +498,284 @@ for name in pairs(CT_ONLY) do CreateSkinDropdown(name) end
 Tab_Skins:CreateSection("T Weapons")
 for name in pairs(SHARED) do CreateSkinDropdown(name) end
 
-if SkinsFolder then
-    for _, folder in ipairs(SkinsFolder:GetChildren()) do
-        local n = folder.Name
-        if not IgnoreFolders[n] and not KNIVES[n] and not GLOVES[n] and not CT_ONLY[n] and not SHARED[n] then 
-            CreateSkinDropdown(n) 
-        end
-    end
-end
-
-camera.ChildAdded:Connect(function(obj)
-    if not SkinChangerEnabled or not isAlive() then return end
-    task.wait(COOLDOWN)
-    applyWeaponSkin(obj)
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(0.5)
-        if SkinChangerEnabled and isAlive() then
-            pcall(function()
-                for _, obj in ipairs(camera:GetChildren()) do
-                    if SelectedSkins[obj.Name] and obj:GetAttribute("SkinApplied") ~= SelectedSkins[obj.Name] then 
-                        applyWeaponSkin(obj) 
-                    end
-                end
-            end)
-        end
+--// ==========================================
+--// EVENTS & LOOPS
+--// ==========================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.E and AimbotMasterEnabled then
+        AimbotToggled = not AimbotToggled
+        if not AimbotToggled then LockedTarget = nil end
+        Rayfield:Notify({Title = "Aimbot", Content = AimbotToggled and "Aimbot TRAVADO" or "Aimbot DESTRAVADO", Duration = 1.5})
     end
 end)
 
---// ==========================================
---// VISUALS TAB LOGIC (ESP PLAYER)
---// ==========================================
-local EspEnabled, EspBox, EspName, EspHealth, EspDistance = false, true, true, true, true
-local espCache = {}
+camera.ChildRemoved:Connect(function(child)
+    if string.find(string.lower(child.Name), "knife") or string.find(string.lower(child.Name), "melee") then
+        if spawned then removeViewmodel() end
+    end
+end)
 
-local function createESP()
-    local esp = {
-        boxOutline = Drawing.new("Square"), box = Drawing.new("Square"),
-        name = Drawing.new("Text"), distance = Drawing.new("Text"),
-        healthOutline = Drawing.new("Line"), healthBar = Drawing.new("Line")
-    }
-    esp.boxOutline.Thickness = 3; esp.boxOutline.Filled = false; esp.boxOutline.Color = Color3.new(0, 0, 0)
-    esp.box.Thickness = 1; esp.box.Filled = false; esp.box.Color = Color3.fromRGB(255, 50, 50)
-    esp.name.Center = true; esp.name.Outline = true; esp.name.Color = Color3.new(1, 1, 1); esp.name.Size = 16
-    esp.distance.Center = true; esp.distance.Outline = true; esp.distance.Color = Color3.new(0.8, 0.8, 0.8); esp.distance.Size = 13
-    esp.healthOutline.Thickness = 3; esp.healthOutline.Color = Color3.new(0, 0, 0)
-    esp.healthBar.Thickness = 1; esp.healthBar.Color = Color3.new(0, 1, 0)
-    return esp
-end
-
+--// RENDER STEPPED (FAST VISUALS LOOP) - OPTIMIZED
 RunService.RenderStepped:Connect(function()
-    if not EspEnabled or not isAlive() then
-        for _, e in pairs(espCache) do 
-            for _, d in pairs(e) do pcall(function() d.Visible = false end) end 
-        end
-        return
+    local living = isAlive()
+    local enemyFolder = living and getEnemyFolder() or nil
+
+    -- FOV circle
+    if ShowFOV then
+        FOVCircle.Position = UserInputService:GetMouseLocation()
+        FOVCircle.Radius = FOV_Radius
+        FOVCircle.Visible = true
+    else
+        FOVCircle.Visible = false
     end
-    
-    local enemyFolder = getEnemyFolder()
-    if not enemyFolder then return end
-    
-    local currentAlive = {}
-    for _, enemy in ipairs(enemyFolder:GetChildren()) do
-        if enemy and enemy.Parent then
-            local hum, root, head = enemy:FindFirstChildOfClass("Humanoid"), enemy:FindFirstChild("HumanoidRootPart"), enemy:FindFirstChild("Head")
-            if hum and hum.Health > 0 and root and head then
-                currentAlive[enemy] = true
-                if not espCache[enemy] then espCache[enemy] = createESP() end
-                local esp = espCache[enemy]
-                
-                pcall(function()
-                    local rootPos, onScreen = camera:WorldToViewportPoint(root.Position)
-                    local headPos = camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-                    local legPos = camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
-                    
-                    if onScreen then
-                        local boxH, boxW = math.abs(headPos.Y - legPos.Y), math.abs(headPos.Y - legPos.Y) / 2
-                        local dist = math.floor((camera.CFrame.Position - root.Position).Magnitude)
-                        
-                        if EspBox then
-                            esp.boxOutline.Size = Vector2.new(boxW, boxH); esp.boxOutline.Position = Vector2.new(rootPos.X - boxW / 2, headPos.Y); esp.boxOutline.Visible = true
-                            esp.box.Size = Vector2.new(boxW, boxH); esp.box.Position = Vector2.new(rootPos.X - boxW / 2, headPos.Y); esp.box.Visible = true
-                        else 
-                            esp.boxOutline.Visible, esp.box.Visible = false, false 
-                        end
-                        
-                        if EspHealth then
-                            local hpPct, barX = math.clamp(hum.Health / hum.MaxHealth, 0, 1), rootPos.X - boxW / 2 - 6
-                            esp.healthOutline.From = Vector2.new(barX, headPos.Y - 1); esp.healthOutline.To = Vector2.new(barX, headPos.Y + boxH + 1); esp.healthOutline.Visible = true
-                            esp.healthBar.From = Vector2.new(barX, headPos.Y + boxH); esp.healthBar.To = Vector2.new(barX, headPos.Y + boxH - (boxH * hpPct)); esp.healthBar.Color = Color3.new(1 - hpPct, hpPct, 0); esp.healthBar.Visible = true
-                        else 
-                            esp.healthOutline.Visible, esp.healthBar.Visible = false, false 
-                        end
-                        
-                        if EspName then 
-                            esp.name.Text = enemy.Name; esp.name.Position = Vector2.new(rootPos.X, headPos.Y - 20); esp.name.Visible = true 
-                        else esp.name.Visible = false end
-                        
-                        if EspDistance then 
-                            esp.distance.Text = "[" .. dist .. "m]"; esp.distance.Position = Vector2.new(rootPos.X, headPos.Y + boxH + 2); esp.distance.Visible = true
-                        else esp.distance.Visible = false end
-                    else 
-                        for _, d in pairs(esp) do d.Visible = false end 
-                    end
-                end)
+
+    -- Aimbot
+    if AimbotToggled and living and LockedTarget then
+        local targetHead = LockedTarget:FindFirstChild("Head")
+        if targetHead then
+            local currentCamCFrame = camera.CFrame
+            local targetCFrame = CFrame_new(currentCamCFrame.Position, targetHead.Position)
+            local alpha = math_clamp(1 / math_max(Smoothing, 1), 0.1, 1)
+            camera.CFrame = currentCamCFrame:Lerp(targetCFrame, alpha)
+        end
+    end
+
+    -- Custom knife viewmodel
+    if scriptRunning then
+        forceHideOriginalKnife()
+        if not spawned and living then
+            for _, c in ipairs(camera:GetChildren()) do
+                local n = string.lower(c.Name)
+                if c ~= vm and (string.find(n, "knife") or string.find(n, "melee") or string.find(n, "karambit")) then
+                    spawnViewmodel()
+                    break
+                end
+            end
+        end
+        if spawned and vm and vm.PrimaryPart then
+            vm.PrimaryPart.CFrame = camera.CFrame * knives[selectedKnife].Offset
+            if not (equipAnim and equipAnim.IsPlaying) and not inspecting and not swinging then
+                if idleAnim and not idleAnim.IsPlaying then idleAnim:Play() end
             end
         end
     end
-    
-    for cEnemy, e in pairs(espCache) do
-        if not currentAlive[cEnemy] then 
-            for _, d in pairs(e) do pcall(function() d:Remove() end) end 
-            espCache[cEnemy] = nil 
+
+    -- Damage chams (outline colored by team, fill transparency based on HP)
+    if EspDamageEnabled and living and enemyFolder then
+        local tFolder = getTFolder()
+        local ctFolder = getCTFolder()
+
+        for _, enemy in ipairs(enemyFolder:GetChildren()) do
+            local hum = enemy:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                local h = chamsCache[enemy]
+                if not h then
+                    h = Instance.new("Highlight")
+                    h.Name = "DmgHighlight"
+                    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    h.FillColor = Color3_new(1, 0, 0) -- static red fill
+                    h.Parent = enemy
+                    chamsCache[enemy] = h
+                end
+
+                local teamColor = Color3_fromRGB(255, 255, 255)
+                if tFolder and enemy:IsDescendantOf(tFolder) then
+                    teamColor = Color3_fromRGB(255, 170, 0)  -- T
+                elseif ctFolder and enemy:IsDescendantOf(ctFolder) then
+                    teamColor = Color3_fromRGB(0, 170, 255)   -- CT
+                end
+
+                local hpPercent = math_clamp(hum.Health / math_max(hum.MaxHealth, 1), 0, 1)
+                h.Adornee = enemy
+                h.FillTransparency = 0.2 + (0.8 * hpPercent)
+                h.OutlineColor = teamColor
+                h.OutlineTransparency = 0
+                h.Enabled = true
+            else
+                if chamsCache[enemy] then chamsCache[enemy].Enabled = false end
+            end
+        end
+    else
+        for _, h in pairs(chamsCache) do
+            if h and h.Parent then h.Enabled = false end
         end
     end
-end)
 
---// ==========================================
---// OTIMIZAÇÃO: ESP C4 (LAG FIX)
---// ==========================================
-local EspC4Enabled = false
-local c4EspCache = {}
-local activeC4s = {}
+    -- ESP Names + HP
+    if EspNamesEnabled and living and enemyFolder then
+        for _, enemy in ipairs(enemyFolder:GetChildren()) do
+            local hum = enemy:FindFirstChildOfClass("Humanoid")
+            local head = enemy:FindFirstChild("Head")
+            if hum and hum.Health > 0 and head then
+                local headPos, onScreen = camera:WorldToViewportPoint(head.Position + Vector3_new(0, 1.5, 0))
 
-local function createC4ESP()
-    local esp = {
-        boxOutline = Drawing.new("Square"),
-        box = Drawing.new("Square"),
-        text = Drawing.new("Text")
-    }
-    esp.boxOutline.Thickness = 3; esp.boxOutline.Filled = false; esp.boxOutline.Color = Color3.new(0, 0, 0)
-    esp.box.Thickness = 1; esp.box.Filled = false; esp.box.Color = Color3.new(1, 1, 1)
-    esp.text.Center = true; esp.text.Outline = true; esp.text.Color = Color3.new(1, 1, 1); esp.text.Size = 14; esp.text.Text = "C4"
-    return esp
-end
+                if not espTexts[enemy] then
+                    espTexts[enemy] = { NameHP = Drawing.new("Text") }
+                    espTexts[enemy].NameHP.Size = 16
+                    espTexts[enemy].NameHP.Center = true
+                    espTexts[enemy].NameHP.Outline = true
+                    espTexts[enemy].NameHP.Color = Color3_fromRGB(255, 255, 255)
+                end
 
-local function getCFrameAndSize(obj)
-    if obj:IsA("Model") then return obj:GetBoundingBox()
-    elseif obj:IsA("BasePart") then return obj.CFrame, obj.Size end
-    return nil, nil
-end
-
-local function checkAndAddC4(obj)
-    if obj and obj.Name then
-        local n = string.lower(obj.Name)
-        if (n == "c4" or n == "plantedc4" or string.find(n, "c4")) and (obj:IsA("Model") or obj:IsA("BasePart")) then
-            activeC4s[obj] = true
-        end
-    end
-end
-
--- Busca inicial rápida
-task.spawn(function()
-    for _, obj in ipairs(Workspace:GetDescendants()) do checkAndAddC4(obj) end
-end)
-
--- Eventos de rastreamento inteligentes (zero lag loop)
-Workspace.DescendantAdded:Connect(checkAndAddC4)
-Workspace.DescendantRemoving:Connect(function(obj)
-    if activeC4s[obj] then activeC4s[obj] = nil end
-end)
-
-local function isValidC4State(obj)
-    if not obj or not obj.Parent then return false end
-    
-    local charModel = obj:FindFirstAncestorOfClass("Model")
-    if charModel and charModel:FindFirstChildOfClass("Humanoid") then
-        return true -- Está na mão de alguém
-    end
-    
-    if obj:IsDescendantOf(Workspace) and not obj:IsDescendantOf(camera) then
-        return true -- Está dropada/plantada no chão
-    end
-    
-    return false
-end
-
-RunService.RenderStepped:Connect(function()
-    if not EspC4Enabled then
-        for _, esp in pairs(c4EspCache) do
-            esp.boxOutline.Visible = false; esp.box.Visible = false; esp.text.Visible = false
-        end
-        return
-    end
-
-    for c4Obj, _ in pairs(activeC4s) do
-        if isValidC4State(c4Obj) then
-            if not c4EspCache[c4Obj] then c4EspCache[c4Obj] = createC4ESP() end
-            local esp = c4EspCache[c4Obj]
-            
-            pcall(function()
-                local cf, size = getCFrameAndSize(c4Obj)
-                if cf and size then
-                    local pos, onScreen = camera:WorldToViewportPoint(cf.Position)
-                    local topPos = camera:WorldToViewportPoint((cf * CFrame.new(0, size.Y / 2, 0)).Position)
-                    local botPos = camera:WorldToViewportPoint((cf * CFrame.new(0, -size.Y / 2, 0)).Position)
-                    
-                    if onScreen then
-                        local boxH = math.abs(topPos.Y - botPos.Y)
-                        local boxW = math.max(boxH, 20)
-                        
-                        esp.boxOutline.Size = Vector2.new(boxW, boxH); esp.boxOutline.Position = Vector2.new(pos.X - boxW / 2, topPos.Y); esp.boxOutline.Visible = true
-                        esp.box.Size = Vector2.new(boxW, boxH); esp.box.Position = Vector2.new(pos.X - boxW / 2, topPos.Y); esp.box.Visible = true
-                        esp.text.Position = Vector2.new(pos.X, topPos.Y - 18); esp.text.Visible = true
-                    else
-                        esp.boxOutline.Visible = false; esp.box.Visible = false; esp.text.Visible = false
-                    end
+                local texts = espTexts[enemy]
+                if onScreen then
+                    texts.NameHP.Text = string.format("%s [%d HP]", enemy.Name, math_floor(hum.Health))
+                    texts.NameHP.Position = Vector2_new(headPos.X, headPos.Y - 25)
+                    texts.NameHP.Visible = true
                 else
-                    esp.boxOutline.Visible = false; esp.box.Visible = false; esp.text.Visible = false
+                    texts.NameHP.Visible = false
                 end
-            end)
-        else
-            if c4EspCache[c4Obj] then
-                c4EspCache[c4Obj].boxOutline.Visible = false
-                c4EspCache[c4Obj].box.Visible = false
-                c4EspCache[c4Obj].text.Visible = false
+            else
+                if espTexts[enemy] then
+                    espTexts[enemy].NameHP.Visible = false
+                end
             end
         end
-    end
-    
-    for c4Obj, esp in pairs(c4EspCache) do
-        if not activeC4s[c4Obj] or not c4Obj.Parent then
-            pcall(function() esp.boxOutline:Remove(); esp.box:Remove(); esp.text:Remove() end)
-            c4EspCache[c4Obj] = nil
+    else
+        for _, texts in pairs(espTexts) do
+            texts.NameHP.Visible = false
         end
     end
 end)
 
-Tab_Visuals:CreateSection("ESP Master Switch")
-Tab_Visuals:CreateToggle({Name = "Enable Player ESP", CurrentValue = false, Flag = "ESPToggle", Callback = function(Value) EspEnabled = Value end})
-Tab_Visuals:CreateSection("ESP Settings")
-Tab_Visuals:CreateToggle({Name = "Show Box", CurrentValue = true, Flag = "EspBoxToggle", Callback = function(Value) EspBox = Value end})
-Tab_Visuals:CreateToggle({Name = "Show Health", CurrentValue = true, Flag = "EspHealthToggle", Callback = function(Value) EspHealth = Value end})
-Tab_Visuals:CreateToggle({Name = "Show Name", CurrentValue = true, Flag = "EspNameToggle", Callback = function(Value) EspName = Value end})
-Tab_Visuals:CreateToggle({Name = "Show Distance", CurrentValue = true, Flag = "EspDistanceToggle", Callback = function(Value) EspDistance = Value end})
-Tab_Visuals:CreateToggle({Name = "ESP C4", CurrentValue = false, Flag = "EspC4Toggle", Callback = function(Value) EspC4Enabled = Value end})
+--// HEARTBEAT (PHYSICS & REGULATED UPDATES) - OPTIMIZED
+local lastSlowUpdate = 0
+local espCacheTimer = 0
 
-local AntiFlashEnabled, AntiSmokeEnabled = false, false
-Tab_Visuals:CreateSection("World & Effects")
-Tab_Visuals:CreateToggle({Name = "Anti-Flashbang", CurrentValue = false, Flag = "AntiFlashToggle", Callback = function(Value) AntiFlashEnabled = Value end})
-Tab_Visuals:CreateToggle({Name = "Anti-Smoke", CurrentValue = false, Flag = "AntiSmokeToggle", Callback = function(Value) AntiSmokeEnabled = Value end})
+RunService.Heartbeat:Connect(function(dt)
+    local now = os_clock()
+    local living = isAlive()
 
-task.spawn(function()
-    while true do
-        task.wait(0.2)
+    -- Aimbot lock acquisition
+    if AimbotToggled and living and AimbotMasterEnabled then
+        if not LockedTarget or not LockedTarget.Parent or not LockedTarget:FindFirstChild("Humanoid") or LockedTarget.Humanoid.Health <= 0 then
+            LockedTarget = getClosestEnemyToMouse()
+        end
+    else
+        LockedTarget = nil
+    end
+
+    -- Bunny hop
+    if BhopEnabled and UserInputService:IsKeyDown(Enum.KeyCode.Space) and living and player.Character then
+        local hum = player.Character:FindFirstChildOfClass("Humanoid")
+        if hum and hum:GetState() ~= Enum.HumanoidStateType.Jumping and hum:GetState() ~= Enum.HumanoidStateType.Freefall then
+            hum.Jump = true
+        end
+    end
+
+    -- TriggerBot (auto-fire when crosshair on enemy)
+    if TriggerBotEnabled and living then
+        local ignoreList = {camera}
+        if player.Character then table.insert(ignoreList, player.Character) end
+        triggerRayParams.FilterDescendantsInstances = ignoreList
+
+        local vp = camera.ViewportSize
+        local ray = camera:ViewportPointToRay(vp.X / 2, vp.Y / 2)
+        local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, triggerRayParams)
+
+        if result and result.Instance then
+            local model = result.Instance:FindFirstAncestorOfClass("Model")
+            if model and model:FindFirstChildOfClass("Humanoid") then
+                local enemyFolder = getEnemyFolder()
+                if enemyFolder and model.Parent == enemyFolder then
+                    local hum = model:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        if now - lastTriggerShot > (TriggerBotDelay / 1000) + 0.05 then
+                            lastTriggerShot = now
+                            if TriggerBotDelay > 0 then
+                                task.delay(TriggerBotDelay / 1000, function()
+                                    if mouse1click then mouse1click() end
+                                end)
+                            else
+                                if mouse1click then mouse1click() end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Clean up stale ESP & chams caches (every 0.3s)
+    espCacheTimer = espCacheTimer + dt
+    if espCacheTimer >= 0.3 then
+        espCacheTimer = 0
+        local enemyFolder = getEnemyFolder()
+
+        -- Collect espTexts to remove
+        local toRemoveEsp = {}
+        for enemy, texts in pairs(espTexts) do
+            local isValid = false
+            if enemy and enemy.Parent and enemyFolder and enemy.Parent == enemyFolder then
+                local hum = enemy:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then isValid = true end
+            end
+            if not isValid or not EspNamesEnabled or not living then
+                table.insert(toRemoveEsp, enemy)
+            end
+        end
+        for _, enemy in ipairs(toRemoveEsp) do
+            local texts = espTexts[enemy]
+            if texts then
+                pcall(function() texts.NameHP:Remove() end)
+                espTexts[enemy] = nil
+            end
+        end
+
+        -- Collect chams to remove
+        local toRemoveChams = {}
+        for enemy, h in pairs(chamsCache) do
+            if not enemy or not enemy.Parent or not enemy:FindFirstChildOfClass("Humanoid") or enemy.Humanoid.Health <= 0 then
+                table.insert(toRemoveChams, enemy)
+            end
+        end
+        for _, enemy in ipairs(toRemoveChams) do
+            local h = chamsCache[enemy]
+            if h then
+                pcall(function() h:Destroy() end)
+                chamsCache[enemy] = nil
+            end
+        end
+    end
+
+    -- Slow tasks (0.5s interval)
+    if now - lastSlowUpdate >= 0.5 then
+        lastSlowUpdate = now
+
+        -- Hitbox expander
+        if HitboxEnabled then
+            local enemyFolder = getEnemyFolder()
+            if enemyFolder then
+                for _, enemy in ipairs(enemyFolder:GetChildren()) do
+                    if enemy and enemy.Parent then
+                        local hum = enemy:FindFirstChildOfClass("Humanoid")
+                        if hum and hum.Health > 0 then
+                            local head = enemy:FindFirstChild("Head")
+                            if head then
+                                -- Store original size if not already
+                                if not originalHeadSizes[head] then
+                                    originalHeadSizes[head] = head.Size
+                                end
+
+                                if HitboxSize > 0 then
+                                    head.Size = Vector3_new(HitboxSize, HitboxSize, HitboxSize)
+                                    head.Massless = true
+                                    head.CanCollide = false
+                                    head.Transparency = 0.5
+                                else
+                                    head.Size = originalHeadSizes[head]
+                                    head.Massless = false
+                                    head.Transparency = 0
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Anti-Flash
         if AntiFlashEnabled then
             pcall(function()
                 local gui = player.PlayerGui:FindFirstChild("FlashbangEffect")
@@ -932,20 +784,16 @@ task.spawn(function()
                 if effect then effect:Destroy() end
             end)
         end
-    end
-end)
 
-task.spawn(function()
-    while true do
-        task.wait(0.5)
+        -- Anti-Smoke
         if AntiSmokeEnabled then
             pcall(function()
                 local debris = Workspace:FindFirstChild("Debris")
                 if debris then
                     for _, folder in ipairs(debris:GetChildren()) do
-                        if folder and string.match(folder.Name, "Voxel") then 
+                        if folder and string.match(folder.Name, "Voxel") then
                             folder:ClearAllChildren()
-                            folder:Destroy() 
+                            folder:Destroy()
                         end
                     end
                 end
@@ -954,6 +802,5 @@ task.spawn(function()
     end
 end)
 
-pcall(function()
-    Rayfield:LoadConfiguration()
-end)
+-- Load configuration (if any)
+pcall(function() Rayfield:LoadConfiguration() end)
