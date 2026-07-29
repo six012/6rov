@@ -1,6 +1,10 @@
 --[[
-    SixHub Bloxtrike - Optimized & Bug-Fixed
-    Performance & stability improvements without altering features/UI
+    SixHub Bloxtrike - Auto-Save, Skin Fixes, Cleaner ESP, and Knife Visibility Fix
+    - Weapon skins now apply immediately when purchased or picked up.
+    - Custom knife model will no longer turn invisible.
+    - ESP highlights are now outline-only (more optimized, less clutter).
+    - Name/HP text is clean and minimal (no outline, smaller size).
+    - Auto-save configuration enabled (settings persist across sessions).
 --]]
 local game = game
 local pcall = pcall
@@ -155,8 +159,13 @@ local function disableCollisions(model)
     end
 end
 
+-- Hide only non-custom knife models (use an attribute to identify our custom knife)
 local function hideKnifeModel(child)
-    if not child or child == vm then return end
+    if not child then return end
+    -- If this model was created by us, skip it entirely
+    if child:IsA("Model") and child:GetAttribute("IsCustomKnife") then
+        return
+    end
     local n = string.lower(child.Name)
     if string.find(n, "knife") or string.find(n, "melee") or string.find(n, "bayonet") or
        string.find(n, "karambit") or string.find(n, "gut") then
@@ -175,8 +184,7 @@ local function forceHideOriginalKnife()
     end
 end
 
-camera.ChildAdded:Connect(hideKnifeModel)
-
+-- Apply skin to weapon/knife model
 local function applyWeaponSkin(model)
     if not model or not SkinChangerEnabled or not isAlive() or not SkinsFolder then return end
     local skinName = SelectedSkins[model.Name]
@@ -213,6 +221,7 @@ local function applyWeaponSkin(model)
                 end
             end
 
+            -- Apply weapon skin
             if not GLOVES[model.Name] then
                 local weaponFolder = model:FindFirstChild("Weapon")
                 if weaponFolder then
@@ -237,7 +246,10 @@ end
 local function removeViewmodel()
     spawned = false
     pcall(function() CAS:UnbindAction(ACTION_INSPECT); CAS:UnbindAction(ACTION_ATTACK) end)
-    if vm then vm:Destroy(); vm = nil end
+    if vm then
+        vm:Destroy()
+        vm = nil
+    end
     animator, inspecting, swinging = nil, false, false
 end
 
@@ -284,7 +296,9 @@ local function spawnViewmodel()
     if not camModel then spawned = false; return end
 
     vm = camModel:Clone()
-    vm.Name, vm.Parent = selectedKnife, camera
+    vm.Name = selectedKnife
+    vm:SetAttribute("IsCustomKnife", true)   -- Mark it so we never hide it
+    vm.Parent = camera
     disableCollisions(vm)
 
     if SkinChangerEnabled then applyWeaponSkin(vm) end
@@ -355,7 +369,7 @@ local Window = Rayfield:CreateWindow({
     DisableRayfieldPrompts = true,
     DisableBuildWarnings = true,
     ConfigurationSaving = {
-        Enabled = false,
+        Enabled = true,               -- Auto-save enabled
         FolderName = "SixHub_Bloxtrike",
         FileName = "SixHub_Bloxtrike"
     }
@@ -418,7 +432,12 @@ Tab_Skins:CreateToggle({
     Flag = "SkinChangerToggle",
     Callback = function(Value)
         SkinChangerEnabled = Value
-        if vm and scriptRunning then applyWeaponSkin(vm) end
+        -- Apply to all current camera children
+        for _, child in ipairs(camera:GetChildren()) do
+            if child:IsA("Model") and not child:GetAttribute("IsCustomKnife") then
+                applyWeaponSkin(child)
+            end
+        end
     end
 })
 
@@ -481,8 +500,14 @@ local function CreateSkinDropdown(weaponName)
                     if other.CurrentOption[1] ~= newSkin then pcall(function() other:Set({newSkin}) end) end
                 end
             end
+            -- Apply to knife viewmodel if matching
             if vm and vm.Name == weaponName then applyWeaponSkin(vm) end
-            for _, obj in ipairs(camera:GetChildren()) do pcall(function() obj:SetAttribute("SkinApplied", nil); applyWeaponSkin(obj) end) end
+            -- Apply to all weapon models in camera
+            for _, obj in ipairs(camera:GetChildren()) do
+                if obj:IsA("Model") and obj.Name == weaponName and not obj:GetAttribute("IsCustomKnife") then
+                    pcall(function() obj:SetAttribute("SkinApplied", nil); applyWeaponSkin(obj) end)
+                end
+            end
         end
     })
     DropdownObjects[weaponName] = DropdownObjects[weaponName] or {}
@@ -507,6 +532,14 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         AimbotToggled = not AimbotToggled
         if not AimbotToggled then LockedTarget = nil end
         Rayfield:Notify({Title = "Aimbot", Content = AimbotToggled and "Aimbot TRAVADO" or "Aimbot DESTRAVADO", Duration = 1.5})
+    end
+end)
+
+-- Apply skins to any new weapon model that appears in the camera (e.g., after buying)
+camera.ChildAdded:Connect(function(child)
+    hideKnifeModel(child)   -- will be skipped for our custom knife because of the attribute
+    if SkinChangerEnabled and isAlive() and child:IsA("Model") and not child:GetAttribute("IsCustomKnife") then
+        applyWeaponSkin(child)
     end
 end)
 
@@ -547,7 +580,7 @@ RunService.RenderStepped:Connect(function()
         if not spawned and living then
             for _, c in ipairs(camera:GetChildren()) do
                 local n = string.lower(c.Name)
-                if c ~= vm and (string.find(n, "knife") or string.find(n, "melee") or string.find(n, "karambit")) then
+                if c ~= vm and (string.find(n, "knife") or string.find(n, "melee") or string.find(n, "karambit")) and not c:GetAttribute("IsCustomKnife") then
                     spawnViewmodel()
                     break
                 end
@@ -561,7 +594,7 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Damage chams (outline colored by team, fill transparency based on HP)
+    -- Cleaner ESP: outline only, no fill (more optimized, less clutter)
     if EspDamageEnabled and living and enemyFolder then
         local tFolder = getTFolder()
         local ctFolder = getCTFolder()
@@ -574,23 +607,21 @@ RunService.RenderStepped:Connect(function()
                     h = Instance.new("Highlight")
                     h.Name = "DmgHighlight"
                     h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    h.FillColor = Color3_new(1, 0, 0) -- static red fill
+                    h.FillTransparency = 1        -- No fill
+                    h.OutlineTransparency = 0
                     h.Parent = enemy
                     chamsCache[enemy] = h
                 end
 
                 local teamColor = Color3_fromRGB(255, 255, 255)
                 if tFolder and enemy:IsDescendantOf(tFolder) then
-                    teamColor = Color3_fromRGB(255, 170, 0)  -- T
+                    teamColor = Color3_fromRGB(255, 170, 0)   -- T
                 elseif ctFolder and enemy:IsDescendantOf(ctFolder) then
-                    teamColor = Color3_fromRGB(0, 170, 255)   -- CT
+                    teamColor = Color3_fromRGB(0, 170, 255)    -- CT
                 end
 
-                local hpPercent = math_clamp(hum.Health / math_max(hum.MaxHealth, 1), 0, 1)
                 h.Adornee = enemy
-                h.FillTransparency = 0.2 + (0.8 * hpPercent)
                 h.OutlineColor = teamColor
-                h.OutlineTransparency = 0
                 h.Enabled = true
             else
                 if chamsCache[enemy] then chamsCache[enemy].Enabled = false end
@@ -602,7 +633,7 @@ RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- ESP Names + HP
+    -- ESP Names + HP (clean, no outline)
     if EspNamesEnabled and living and enemyFolder then
         for _, enemy in ipairs(enemyFolder:GetChildren()) do
             local hum = enemy:FindFirstChildOfClass("Humanoid")
@@ -611,11 +642,12 @@ RunService.RenderStepped:Connect(function()
                 local headPos, onScreen = camera:WorldToViewportPoint(head.Position + Vector3_new(0, 1.5, 0))
 
                 if not espTexts[enemy] then
-                    espTexts[enemy] = { NameHP = Drawing.new("Text") }
-                    espTexts[enemy].NameHP.Size = 16
-                    espTexts[enemy].NameHP.Center = true
-                    espTexts[enemy].NameHP.Outline = true
-                    espTexts[enemy].NameHP.Color = Color3_fromRGB(255, 255, 255)
+                    local textObj = Drawing.new("Text")
+                    textObj.Size = 14
+                    textObj.Center = true
+                    textObj.Outline = false
+                    textObj.Color = Color3_fromRGB(255, 255, 255)
+                    espTexts[enemy] = { NameHP = textObj }
                 end
 
                 local texts = espTexts[enemy]
@@ -802,5 +834,5 @@ RunService.Heartbeat:Connect(function(dt)
     end
 end)
 
--- Load configuration (if any)
+-- Load configuration (auto-save enabled)
 pcall(function() Rayfield:LoadConfiguration() end)
